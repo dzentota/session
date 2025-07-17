@@ -40,7 +40,7 @@ class FileCache implements CacheInterface
         return (time() - $modifiedTime) > $ttl;
     }
 
-    public function get($key, $default = null)
+    public function get(string $key, mixed $default = null): mixed
     {
         // Print debug information for keys related to sessions
         if (strpos($key, 'session_') === 0) {
@@ -70,7 +70,7 @@ class FileCache implements CacheInterface
         return $data['value'] ?? $default;
     }
 
-    public function set($key, $value, $ttl = null)
+    public function set(string $key, mixed $value, null|int|\DateInterval $ttl = null): bool
     {
         // Print debug information for keys related to sessions
         if (strpos($key, 'session_') === 0) {
@@ -87,7 +87,7 @@ class FileCache implements CacheInterface
         return file_put_contents($filePath, serialize($data)) !== false;
     }
 
-    public function delete($key)
+    public function delete(string $key): bool
     {
         $filePath = $this->getFilePath($key);
 
@@ -98,7 +98,7 @@ class FileCache implements CacheInterface
         return true;
     }
 
-    public function clear()
+    public function clear(): bool
     {
         $files = glob($this->directory . '/*.cache');
 
@@ -109,7 +109,7 @@ class FileCache implements CacheInterface
         return true;
     }
 
-    public function getMultiple($keys, $default = null)
+    public function getMultiple(iterable $keys, mixed $default = null): iterable
     {
         $result = [];
 
@@ -120,7 +120,7 @@ class FileCache implements CacheInterface
         return $result;
     }
 
-    public function setMultiple($values, $ttl = null)
+    public function setMultiple(iterable $values, null|int|\DateInterval $ttl = null): bool
     {
         $success = true;
 
@@ -131,7 +131,7 @@ class FileCache implements CacheInterface
         return $success;
     }
 
-    public function deleteMultiple($keys)
+    public function deleteMultiple(iterable $keys): bool
     {
         $success = true;
 
@@ -142,7 +142,7 @@ class FileCache implements CacheInterface
         return $success;
     }
 
-    public function has($key)
+    public function has(string $key): bool
     {
         $filePath = $this->getFilePath($key);
 
