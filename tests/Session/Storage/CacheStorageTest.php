@@ -83,6 +83,22 @@ class CacheStorageTest extends TestCase
         $this->assertTrue($result);
     }
 
+    public function testInvalidEncryptorThrows(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/encryptor must be callable/');
+
+        new CacheStorage($this->cache, 'session_', 'not_a_real_function_xyz');
+    }
+
+    public function testInvalidDecryptorThrows(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/decryptor must be callable/');
+
+        new CacheStorage($this->cache, 'session_', null, new \stdClass());
+    }
+
     public function testEncryptionDecryption(): void
     {
         $encryptedData = 'encrypted:' . $this->sessionData;

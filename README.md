@@ -29,7 +29,13 @@ use Psr\SimpleCache\CacheInterface;
 // Initialize dependencies
 $cache = new YourPsrCacheImplementation();
 $storage = new CacheStorage($cache);
-$cookieManager = new CookieManager('session', '/', 3600, true, true, 'Lax');
+$cookieManager = new CookieManager(
+    name: '__Host-id',  // cookie name
+    secure: true,       // HTTPS only
+    httpOnly: true,     // not accessible via JavaScript
+    sameSite: 'Lax',   // SameSite policy
+    lifetime: 3600      // 1 hour (null = session cookie)
+);
 
 // Create session manager
 $sessionManager = new SessionManager($storage, $cookieManager);
@@ -65,7 +71,7 @@ use Dzentota\Session\Storage\CacheStorage;
 // Create session middleware
 $sessionMiddleware = new SessionMiddleware(
     new CacheStorage($cache),
-    new CookieManager('session', '/', 3600, true, true, 'Lax'),
+    new CookieManager(name: '__Host-id', sameSite: 'Lax', lifetime: 3600),
     1800,   // idle timeout in seconds (30 minutes)
     14400   // absolute lifetime in seconds (4 hours)
 );
@@ -165,12 +171,12 @@ $sessionManager = new SessionManager(
 ```php
 // Create secure cookie manager
 $cookieManager = new CookieManager(
-    '__Host-session',  // __Host- prefix enhances security
-    '/',               // path
-    3600,              // cookie lifetime in seconds (1 hour)
-    true,              // secure (HTTPS only)
-    true,              // httpOnly (not accessible via JavaScript)
-    'Strict'           // SameSite policy (Strict, Lax, or None)
+    name: '__Host-session', // __Host- prefix enhances security
+    secure: true,           // HTTPS only (forced by __Host- prefix)
+    httpOnly: true,         // not accessible via JavaScript
+    sameSite: 'Strict',    // SameSite policy (Strict, Lax, or None)
+    path: '/',              // cookie path
+    lifetime: 3600          // cookie lifetime in seconds (null = session cookie)
 );
 ```
 
@@ -187,7 +193,7 @@ $app = AppFactory::create();
 // Add session middleware
 $app->add(new SessionMiddleware(
     new CacheStorage($cache),
-    new CookieManager('session')
+    new CookieManager(name: '__Host-id')
 ));
 
 // Use in routes
@@ -223,7 +229,7 @@ $cacheAdapter = new class(Cache::store()) implements \Psr\SimpleCache\CacheInter
 $app->singleton('session', function ($app) use ($cacheAdapter) {
     return new SessionManager(
         new CacheStorage($cacheAdapter),
-        new CookieManager('session')
+        new CookieManager(name: '__Host-id')
     );
 });
 

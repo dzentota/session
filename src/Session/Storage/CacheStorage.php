@@ -24,6 +24,13 @@ class CacheStorage implements SessionStorageInterface
         private mixed $encryptor = null,
         private mixed $decryptor = null
     ) {
+        if ($this->encryptor !== null && !is_callable($this->encryptor)) {
+            throw new \InvalidArgumentException('The encryptor must be callable.');
+        }
+
+        if ($this->decryptor !== null && !is_callable($this->decryptor)) {
+            throw new \InvalidArgumentException('The decryptor must be callable.');
+        }
     }
 
     /**

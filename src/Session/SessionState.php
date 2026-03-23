@@ -114,6 +114,25 @@ final class SessionState
     }
 
     /**
+     * Create a new state with additional data merged in (existing keys are overwritten)
+     */
+    public function withMergedData(array $data): self
+    {
+        if (empty($data)) {
+            return $this;
+        }
+
+        return new self(
+            $this->id,
+            array_merge($this->data, $data),
+            $this->createdAt,
+            $this->lastActivityAt,
+            $this->status,
+            true // Mark as dirty
+        );
+    }
+
+    /**
      * Create a new state with all data cleared
      */
     public function withClearedData(): self

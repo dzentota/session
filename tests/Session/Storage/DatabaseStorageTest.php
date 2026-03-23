@@ -168,6 +168,30 @@ class DatabaseStorageTest extends TestCase
         $this->assertTrue($result);
     }
 
+    public function testInvalidTableNameThrows(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/Invalid table name/');
+
+        new DatabaseStorage($this->pdo, 'sessions; DROP TABLE users--');
+    }
+
+    public function testInvalidEncryptorThrows(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/encryptor must be callable/');
+
+        new DatabaseStorage($this->pdo, 'sessions', 'not_a_callable_string_that_does_not_exist');
+    }
+
+    public function testInvalidDecryptorThrows(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/decryptor must be callable/');
+
+        new DatabaseStorage($this->pdo, 'sessions', null, 42);
+    }
+
     public function testEncryptionDecryption(): void
     {
         $encryptedData = 'encrypted:' . $this->sessionData;

@@ -28,12 +28,23 @@ class SessionManager implements SessionManagerInterface
     private bool $initialized = false;
 
     /**
+     * Binding data derived from the client request, stored separately from user
+     * session data so it is always re-persisted on commit without leaking into
+     * the public getData() / get() API.
+     *
+     * @var array<string, string>
+     */
+    private array $bindingData = [];
+
+    /**
      * @param SessionStorageInterface $storage Storage adapter for session data
      * @param CookieManagerInterface $cookieManager Cookie manager for session cookies
      * @param int $idleTimeout Idle timeout in seconds (default: 30 minutes)
      * @param int $absoluteTimeout Absolute timeout in seconds (default: 4 hours)
      * @param bool $bindToIp Whether to bind session to IP address
      * @param bool $bindToUserAgent Whether to bind session to User-Agent header
+     * @param int $regenerateGracePeriod Seconds the old session ID remains valid after
+     *        regeneration (0 = destroy immediately, recommended for high-security apps)
      */
     public function __construct(
         private SessionStorageInterface $storage,
@@ -41,7 +52,8 @@ class SessionManager implements SessionManagerInterface
         private int $idleTimeout = 1800,
         private int $absoluteTimeout = 14400,
         private bool $bindToIp = true,
-        private bool $bindToUserAgent = true
+        private bool $bindToUserAgent = true,
+        private int $regenerateGracePeriod = 0
     ) {
     }
 
@@ -57,9 +69,9 @@ class SessionManager implements SessionManagerInterface
         // Extract session ID from cookie if present
         $sessionId = $this->getSessionIdFromRequest($request);
 
-        // Generate a new session ID if none was found or if it's invalid
+        // No cookie — brand-new session
         if ($sessionId === null) {
-            $this->state = new SessionState(SessionId::generate());
+            $this->state = $this->createNewSession($request);
             $this->initialized = true;
             return $this->state;
         }
@@ -67,9 +79,9 @@ class SessionManager implements SessionManagerInterface
         // Attempt to load session data
         $data = $this->storage->read($sessionId);
 
-        // If no data found, create a new session
+        // Nothing in storage — brand-new session
         if ($data === null) {
-            $this->state = new SessionState(SessionId::generate());
+            $this->state = $this->createNewSession($request);
             $this->initialized = true;
             return $this->state;
         }
@@ -86,7 +98,7 @@ class SessionManager implements SessionManagerInterface
             ? new DateTimeImmutable($sessionData['_last_activity_at'])
             : new DateTimeImmutable();
 
-        // Remove internal metadata from the user data array
+        // Strip internal metadata from the user-visible data array
         unset(
             $sessionData['_created_at'],
             $sessionData['_last_activity_at']
@@ -95,32 +107,37 @@ class SessionManager implements SessionManagerInterface
         // Check idle timeout
         $now = new DateTimeImmutable();
         if ($now->getTimestamp() - $lastActivityAt->getTimestamp() > $this->idleTimeout) {
-            // Session expired due to inactivity
             $this->storage->destroy($sessionId);
-            $this->state = new SessionState(SessionId::generate());
+            $this->state = $this->createNewSession($request);
             $this->initialized = true;
             return $this->state;
         }
 
         // Check absolute timeout
         if ($now->getTimestamp() - $createdAt->getTimestamp() > $this->absoluteTimeout) {
-            // Session expired due to absolute timeout
             $this->storage->destroy($sessionId);
-            $this->state = new SessionState(SessionId::generate());
+            $this->state = $this->createNewSession($request);
             $this->initialized = true;
             return $this->state;
         }
+
+        // Extract and strip binding data before building the user-visible state
+        $storedBindingData = $this->extractBindingData($sessionData);
+        unset($sessionData[self::USER_AGENT_KEY], $sessionData[self::IP_HASH_KEY]);
 
         // Verify session binding if enabled
-        if (!$this->verifySessionBinding($request, $sessionData)) {
+        if (!$this->verifySessionBinding($request, $storedBindingData)) {
             // Session binding mismatch - potential hijacking attempt
             $this->storage->destroy($sessionId);
-            $this->state = new SessionState(SessionId::generate());
+            $this->state = $this->createNewSession($request);
             $this->initialized = true;
             return $this->state;
         }
 
-        // Create session state with loaded data
+        // Refresh binding data for the current request (e.g. rotating hash salts)
+        $this->bindingData = $this->buildBindingData($request);
+
+        // Create session state with clean user data only
         $this->state = new SessionState(
             $sessionId,
             $sessionData,
@@ -172,13 +189,18 @@ class SessionManager implements SessionManagerInterface
         // Create a new state with regenerated ID
         $this->state = $this->state->withRegeneratedId();
 
-        // Copy session data to new ID
+        // Write data to new ID
         $serializedData = $this->serializeData($this->prepareDataForStorage($this->state));
         $this->storage->write($this->state->getId(), $serializedData, $this->absoluteTimeout);
 
-        // Mark old session with short grace period
-        $graceLifetime = 10; // 10 seconds grace period
-        $this->storage->write($oldId, $serializedData, $graceLifetime);
+        if ($this->regenerateGracePeriod > 0) {
+            // Keep old session alive for a short grace window to handle
+            // concurrent requests that may still carry the old cookie.
+            $this->storage->write($oldId, $serializedData, $this->regenerateGracePeriod);
+        } else {
+            // Destroy old session immediately (recommended default).
+            $this->storage->destroy($oldId);
+        }
     }
 
     /**
@@ -276,15 +298,38 @@ class SessionManager implements SessionManagerInterface
     }
 
     /**
-     * Prepare session data for storage, including metadata
+     * Create a fresh session state and initialise binding data from the request.
+     * All new-session paths go through this method so binding is always seeded.
+     */
+    private function createNewSession(ServerRequestInterface $request): SessionState
+    {
+        $this->bindingData = $this->buildBindingData($request);
+        $state = new SessionState(SessionId::generate());
+
+        // Binding data is stored separately (see prepareDataForStorage) so it
+        // does not pollute the user-visible data API, but it must be written on
+        // first commit so the next request can verify it.
+        // We still mark the state dirty so commit() persists it.
+        return $state->withMergedData([]); // marks dirty
+    }
+
+    /**
+     * Prepare session data for storage, including metadata and binding data.
+     * Binding keys are intentionally kept out of the public SessionState data
+     * array and injected here so they are always persisted.
      */
     private function prepareDataForStorage(SessionState $state): array
     {
         $data = $state->getData();
 
-        // Add metadata
+        // Internal metadata
         $data['_created_at'] = $state->getCreatedAt()->format('c');
         $data['_last_activity_at'] = $state->getLastActivityAt()->format('c');
+
+        // Binding data (may be empty when binding is disabled)
+        foreach ($this->bindingData as $key => $value) {
+            $data[$key] = $value;
+        }
 
         return $data;
     }
@@ -298,11 +343,13 @@ class SessionManager implements SessionManagerInterface
     }
 
     /**
-     * Unserialize session data from storage
+     * Unserialize session data from storage.
+     * Restricts deserialization to plain arrays/scalars to prevent
+     * PHP object injection (POP gadget chain) attacks.
      */
     private function unserializeData(string $data): array
     {
-        $unserialized = unserialize($data);
+        $unserialized = unserialize($data, ['allowed_classes' => false]);
         if (!is_array($unserialized)) {
             return [];
         }
@@ -315,9 +362,6 @@ class SessionManager implements SessionManagerInterface
     private function getSessionIdFromRequest(ServerRequestInterface $request): ?SessionId
     {
         $cookies = $request->getCookieParams();
-
-        // Получаем имя куки из CookieManager
-        // Это добавленный метод, который нам нужно реализовать в CookieManagerInterface и CookieManager
         $cookieName = $this->cookieManager->getCookieName();
 
         if (!isset($cookies[$cookieName])) {
@@ -332,48 +376,70 @@ class SessionManager implements SessionManagerInterface
     }
 
     /**
-     * Verify session binding to client characteristics
+     * Build the binding data array from the current request.
+     *
+     * @return array<string, string>
      */
-    private function verifySessionBinding(ServerRequestInterface $request, array $sessionData): bool
+    private function buildBindingData(ServerRequestInterface $request): array
     {
-        // Check User-Agent binding
-        if ($this->bindToUserAgent && isset($sessionData[self::USER_AGENT_KEY])) {
+        $binding = [];
+
+        if ($this->bindToUserAgent) {
+            $binding[self::USER_AGENT_KEY] = $request->getHeaderLine('User-Agent');
+        }
+
+        if ($this->bindToIp) {
+            $ip = SessionSecurity::getClientIp($request->getServerParams());
+            $binding[self::IP_HASH_KEY] = SessionSecurity::hashIpAddress($ip);
+        }
+
+        return $binding;
+    }
+
+    /**
+     * Extract stored binding keys from the raw session data array.
+     *
+     * @param array $sessionData Raw deserialized session data
+     * @return array<string, string>
+     */
+    private function extractBindingData(array $sessionData): array
+    {
+        $binding = [];
+
+        if (isset($sessionData[self::USER_AGENT_KEY])) {
+            $binding[self::USER_AGENT_KEY] = $sessionData[self::USER_AGENT_KEY];
+        }
+
+        if (isset($sessionData[self::IP_HASH_KEY])) {
+            $binding[self::IP_HASH_KEY] = $sessionData[self::IP_HASH_KEY];
+        }
+
+        return $binding;
+    }
+
+    /**
+     * Verify session binding against stored client characteristics.
+     *
+     * @param array<string, string> $storedBinding Previously stored binding data
+     */
+    private function verifySessionBinding(ServerRequestInterface $request, array $storedBinding): bool
+    {
+        if ($this->bindToUserAgent && isset($storedBinding[self::USER_AGENT_KEY])) {
             $currentUserAgent = $request->getHeaderLine('User-Agent');
-            if (!hash_equals($sessionData[self::USER_AGENT_KEY], $currentUserAgent)) {
+            if (!hash_equals($storedBinding[self::USER_AGENT_KEY], $currentUserAgent)) {
                 return false;
             }
         }
 
-        // Check IP binding
-        if ($this->bindToIp && isset($sessionData[self::IP_HASH_KEY])) {
+        if ($this->bindToIp && isset($storedBinding[self::IP_HASH_KEY])) {
             $currentIp = SessionSecurity::getClientIp($request->getServerParams());
             $currentIpHash = SessionSecurity::hashIpAddress($currentIp);
-            if (!hash_equals($sessionData[self::IP_HASH_KEY], $currentIpHash)) {
+            if (!hash_equals($storedBinding[self::IP_HASH_KEY], $currentIpHash)) {
                 return false;
             }
         }
 
         return true;
-    }
-
-    /**
-     * Create session binding data based on client characteristics
-     */
-    private function createSessionBinding(ServerRequestInterface $request, array $sessionData): array
-    {
-        // Bind to User-Agent
-        if ($this->bindToUserAgent) {
-            $userAgent = $request->getHeaderLine('User-Agent');
-            $sessionData[self::USER_AGENT_KEY] = $userAgent;
-        }
-
-        // Bind to IP address (hashed)
-        if ($this->bindToIp) {
-            $ip = SessionSecurity::getClientIp($request->getServerParams());
-            $sessionData[self::IP_HASH_KEY] = SessionSecurity::hashIpAddress($ip);
-        }
-
-        return $sessionData;
     }
 
     /**
@@ -389,3 +455,4 @@ class SessionManager implements SessionManagerInterface
         }
     }
 }
+

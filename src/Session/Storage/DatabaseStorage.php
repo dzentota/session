@@ -15,8 +15,8 @@ class DatabaseStorage implements SessionStorageInterface
     /**
      * @param PDO $pdo PDO connection instance
      * @param string $table Table name for session storage
-     * @param mixed $encryptor Optional callback for encrypting data (function(string $data): string)
-     * @param mixed $decryptor Optional callback for decrypting data (function(string $encryptedData): string)
+     * @param callable|null $encryptor Optional callback for encrypting data (function(string $data): string)
+     * @param callable|null $decryptor Optional callback for decrypting data (function(string $encryptedData): string)
      */
     public function __construct(
         private PDO $pdo,
@@ -24,6 +24,20 @@ class DatabaseStorage implements SessionStorageInterface
         private mixed $encryptor = null,
         private mixed $decryptor = null
     ) {
+        if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $this->table)) {
+            throw new \InvalidArgumentException(
+                "Invalid table name \"{$this->table}\": only letters, digits, and underscores are allowed."
+            );
+        }
+
+        if ($this->encryptor !== null && !is_callable($this->encryptor)) {
+            throw new \InvalidArgumentException('The encryptor must be callable.');
+        }
+
+        if ($this->decryptor !== null && !is_callable($this->decryptor)) {
+            throw new \InvalidArgumentException('The decryptor must be callable.');
+        }
+
         // Ensure PDO throws exceptions
         $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     }
