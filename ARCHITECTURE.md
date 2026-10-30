@@ -79,7 +79,7 @@ The library implements several security features:
 
 ```php
 $storage = new CacheStorage($cache);
-$cookieManager = new CookieManager('session');
+$cookieManager = new CookieManager('__Host-id');
 $sessionManager = new SessionManager($storage, $cookieManager);
 
 // Start the session

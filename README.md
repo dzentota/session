@@ -16,6 +16,8 @@ A secure and flexible session management library for PHP applications with PSR-7
 composer require dzentota/session
 ```
 
+Requires PHP 8.3 or newer.
+
 ## Quick Start
 
 ### Basic Usage
@@ -29,7 +31,13 @@ use Psr\SimpleCache\CacheInterface;
 // Initialize dependencies
 $cache = new YourPsrCacheImplementation();
 $storage = new CacheStorage($cache);
-$cookieManager = new CookieManager('session', '/', 3600, true, true, 'Lax');
+$cookieManager = new CookieManager(
+    name: '__Host-id',  // cookie name
+    secure: true,       // HTTPS only
+    httpOnly: true,     // not accessible via JavaScript
+    sameSite: 'Lax',   // SameSite policy
+    lifetime: 3600      // 1 hour (null = session cookie)
+);
 
 // Create session manager
 $sessionManager = new SessionManager($storage, $cookieManager);
@@ -44,7 +52,9 @@ $token = $sessionManager->generateCsrfToken();
 // Insert the token into your application forms:
 // <input type="hidden" name="csrf_token" value="<?= $token->toNative() ?>">
 
-// Verify token when processing the form
+// Verify token when processing the form. Up to 10 outstanding tokens
+// (configurable via csrfTokenPoolSize / csrfTokenTtl) are accepted, so several
+// open tabs/forms work. Use consumeCsrfToken() instead for single-use tokens.
 if ($sessionManager->isCsrfTokenValid($_POST['csrf_token'])) {
     // Continue form processing
 } else {
@@ -65,7 +75,7 @@ use Dzentota\Session\Storage\CacheStorage;
 // Create session middleware
 $sessionMiddleware = new SessionMiddleware(
     new CacheStorage($cache),
-    new CookieManager('session', '/', 3600, true, true, 'Lax'),
+    new CookieManager(name: '__Host-id', sameSite: 'Lax', lifetime: 3600),
     1800,   // idle timeout in seconds (30 minutes)
     14400   // absolute lifetime in seconds (4 hours)
 );
@@ -112,20 +122,22 @@ $storage = new CacheStorage(
 ```php
 use Dzentota\Session\Storage\DatabaseStorage;
 
-// Create the table in your database:
-// 
-// CREATE TABLE sessions (
-//     session_id VARCHAR(36) PRIMARY KEY,
-//     session_data BLOB NOT NULL,
-//     expires_at INT UNSIGNED NOT NULL,
-//     created_at INT UNSIGNED NOT NULL
-// );
-
-// Initialize PDO
+// Initialize PDO (mysql, sqlite and pgsql are supported)
 $pdo = new PDO('mysql:host=localhost;dbname=myapp', 'username', 'password');
 
 // Create storage
 $storage = new DatabaseStorage($pdo, 'sessions');
+
+// Create the table + indexes (driver-aware, idempotent). On failure it returns
+// false, logs via error_log() and exposes the exception via getLastError().
+if (!$storage->createTable()) {
+    throw $storage->getLastError();
+}
+// Or inspect/run the DDL yourself: $storage->getCreateTableStatements()
+
+// DatabaseStorage does not permanently change your PDO's error mode: it switches
+// to ERRMODE_EXCEPTION for each of its own queries and restores your setting.
+// Its read/write/destroy/gc methods throw PDOException on database errors.
 
 // Use storage with session manager
 $sessionManager = new SessionManager($storage, $cookieManager);
@@ -145,6 +157,10 @@ if ($authentication->isValid($username, $password)) {
 }
 ```
 
+After `regenerateId()` the old ID never yields session data. With
+`regenerateGracePeriod > 0` only a tombstone is kept under the old ID for that
+many seconds; a request presenting it receives a fresh, empty session.
+
 ### Session Binding to Client
 
 By default, sessions are bound to the client's IP address and User-Agent, increasing security:
@@ -162,15 +178,28 @@ $sessionManager = new SessionManager(
 
 ### Cookie Security Settings
 
+Constructor signature (positional order):
+
+```php
+public function __construct(
+    string $name = '__Host-id',
+    bool $secure = true,
+    bool $httpOnly = true,
+    string $sameSite = 'Strict',
+    string $path = '/',
+    ?int $lifetime = null
+)
+```
+
 ```php
 // Create secure cookie manager
 $cookieManager = new CookieManager(
-    '__Host-session',  // __Host- prefix enhances security
-    '/',               // path
-    3600,              // cookie lifetime in seconds (1 hour)
-    true,              // secure (HTTPS only)
-    true,              // httpOnly (not accessible via JavaScript)
-    'Strict'           // SameSite policy (Strict, Lax, or None)
+    name: '__Host-session', // __Host- prefix enhances security
+    secure: true,           // HTTPS only (forced by __Host- prefix)
+    httpOnly: true,         // not accessible via JavaScript
+    sameSite: 'Strict',    // SameSite policy (Strict, Lax, or None)
+    path: '/',              // cookie path
+    lifetime: 3600          // cookie lifetime in seconds (null = session cookie)
 );
 ```
 
@@ -187,7 +216,7 @@ $app = AppFactory::create();
 // Add session middleware
 $app->add(new SessionMiddleware(
     new CacheStorage($cache),
-    new CookieManager('session')
+    new CookieManager(name: '__Host-id')
 ));
 
 // Use in routes
@@ -223,7 +252,7 @@ $cacheAdapter = new class(Cache::store()) implements \Psr\SimpleCache\CacheInter
 $app->singleton('session', function ($app) use ($cacheAdapter) {
     return new SessionManager(
         new CacheStorage($cacheAdapter),
-        new CookieManager('session')
+        new CookieManager(name: '__Host-id')
     );
 });
 

@@ -192,6 +192,37 @@ class SessionStateTest extends TestCase
         $this->assertEquals($oldState->getStatus(), $refreshedState->getStatus());
     }
 
+    public function testWithMergedData(): void
+    {
+        // Merge new keys into existing state
+        $newState = $this->state->withMergedData(['extra_key' => 'extra_value', 'user_id' => 999]);
+
+        // Ensure immutability
+        $this->assertNotSame($this->state, $newState);
+
+        // Merged key is present
+        $this->assertEquals('extra_value', $newState->get('extra_key'));
+
+        // Existing key is overwritten when provided
+        $this->assertEquals(999, $newState->get('user_id'));
+
+        // Other original data is preserved
+        $this->assertEquals('john_doe', $newState->get('username'));
+
+        // New state is dirty
+        $this->assertTrue($newState->isDirty());
+
+        // Original state is unchanged
+        $this->assertFalse($this->state->has('extra_key'));
+        $this->assertEquals(123, $this->state->get('user_id'));
+    }
+
+    public function testWithMergedDataEmptyArrayReturnsSameInstance(): void
+    {
+        $same = $this->state->withMergedData([]);
+        $this->assertSame($this->state, $same);
+    }
+
     public function testWithCleanState(): void
     {
         // First create a dirty state
