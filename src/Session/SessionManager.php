@@ -19,7 +19,8 @@ use Psr\Http\Message\ServerRequestInterface;
  */
 class SessionManager implements SessionManagerInterface
 {
-    private const CSRF_TOKEN_KEY = '_csrf_token';
+    private const CSRF_TOKEN_KEY = '_csrf_token'; // legacy single-hash key (read-only)
+    private const CSRF_TOKENS_KEY = '_csrf_tokens'; // array<hash, expiresAt>
     private const USER_AGENT_KEY = '_user_agent';
     private const IP_HASH_KEY = '_ip_hash';
     private const SESSION_COOKIE_NAME = 'Set-Cookie';
@@ -47,6 +48,8 @@ class SessionManager implements SessionManagerInterface
      * @param int $regenerateGracePeriod Seconds a tombstone is kept under the old session ID
      *        after regeneration (0 = destroy immediately). The tombstone never yields
      *        session data; requests presenting the old ID receive a fresh empty session.
+     * @param int $csrfTokenPoolSize Max number of outstanding CSRF tokens (oldest evicted first)
+     * @param int $csrfTokenTtl CSRF token lifetime in seconds (0 = no expiry beyond the session)
      */
     public function __construct(
         private SessionStorageInterface $storage,
@@ -55,8 +58,13 @@ class SessionManager implements SessionManagerInterface
         private int $absoluteTimeout = 14400,
         private bool $bindToIp = true,
         private bool $bindToUserAgent = true,
-        private int $regenerateGracePeriod = 0
+        private int $regenerateGracePeriod = 0,
+        private int $csrfTokenPoolSize = 10,
+        private int $csrfTokenTtl = 7200
     ) {
+        if ($this->csrfTokenPoolSize < 1) {
+            throw new \InvalidArgumentException('csrfTokenPoolSize must be >= 1');
+        }
     }
 
     /**
@@ -249,6 +257,8 @@ class SessionManager implements SessionManagerInterface
 
     /**
      * {@inheritDoc}
+     *
+     * Tokens are kept in a bounded pool so several open forms/tabs stay valid.
      */
     public function generateCsrfToken(): CsrfToken
     {
@@ -256,8 +266,14 @@ class SessionManager implements SessionManagerInterface
 
         $token = CsrfToken::generate();
 
-        // Store only the hash in the session
-        $this->state = $this->state->with(self::CSRF_TOKEN_KEY, $token->getHash());
+        $pool = $this->getCsrfPool();
+        $pool[$token->getHash()] = $this->csrfTokenTtl > 0 ? time() + $this->csrfTokenTtl : PHP_INT_MAX;
+        while (count($pool) > $this->csrfTokenPoolSize) {
+            array_shift($pool);
+        }
+
+        // Store only hashes in the session
+        $this->state = $this->state->with(self::CSRF_TOKENS_KEY, $pool);
 
         return $token;
     }
@@ -268,19 +284,71 @@ class SessionManager implements SessionManagerInterface
     public function isCsrfTokenValid(string $submittedToken): bool
     {
         $this->ensureInitialized();
+        return $this->findCsrfHash($submittedToken) !== null;
+    }
 
-        $storedHash = $this->state->get(self::CSRF_TOKEN_KEY);
-        if ($storedHash === null) {
+    /**
+     * Validate a CSRF token and remove it from the pool (single use).
+     */
+    public function consumeCsrfToken(string $submittedToken): bool
+    {
+        $this->ensureInitialized();
+
+        $hash = $this->findCsrfHash($submittedToken);
+        if ($hash === null) {
             return false;
         }
 
+        if ($this->state->get(self::CSRF_TOKEN_KEY) === $hash) {
+            $this->state = $this->state->without(self::CSRF_TOKEN_KEY);
+        }
+        $pool = $this->getCsrfPool();
+        if (isset($pool[$hash])) {
+            unset($pool[$hash]);
+            $this->state = $this->state->with(self::CSRF_TOKENS_KEY, $pool);
+        }
+
+        return true;
+    }
+
+    /**
+     * @return array<string, int> non-expired hash => expiresAt
+     */
+    private function getCsrfPool(): array
+    {
+        $pool = $this->state->get(self::CSRF_TOKENS_KEY, []);
+        if (!is_array($pool)) {
+            return [];
+        }
+        $now = time();
+        return array_filter(
+            $pool,
+            static fn ($exp, $hash) => is_string($hash) && is_int($exp) && $exp > $now,
+            ARRAY_FILTER_USE_BOTH
+        );
+    }
+
+    private function findCsrfHash(string $submittedToken): ?string
+    {
         try {
-            $token = CsrfToken::fromNative($submittedToken);
-            // Compare the hash of the submitted token with the stored hash
-            return hash_equals($storedHash, $token->getHash());
+            $submittedHash = CsrfToken::fromNative($submittedToken)->getHash();
         } catch (InvalidTokenException $e) {
-            return false;
+            return null;
         }
+
+        $candidates = array_keys($this->getCsrfPool());
+        $legacy = $this->state->get(self::CSRF_TOKEN_KEY);
+        if (is_string($legacy)) {
+            $candidates[] = $legacy;
+        }
+
+        $match = null;
+        foreach ($candidates as $hash) {
+            if (hash_equals((string) $hash, $submittedHash)) {
+                $match = (string) $hash;
+            }
+        }
+        return $match;
     }
 
     /**
