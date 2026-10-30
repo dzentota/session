@@ -23,6 +23,7 @@ class SessionManager implements SessionManagerInterface
     private const USER_AGENT_KEY = '_user_agent';
     private const IP_HASH_KEY = '_ip_hash';
     private const SESSION_COOKIE_NAME = 'Set-Cookie';
+    private const TOMBSTONE_KEY = '_regenerated';
 
     private ?SessionState $state = null;
     private bool $initialized = false;
@@ -43,8 +44,9 @@ class SessionManager implements SessionManagerInterface
      * @param int $absoluteTimeout Absolute timeout in seconds (default: 4 hours)
      * @param bool $bindToIp Whether to bind session to IP address
      * @param bool $bindToUserAgent Whether to bind session to User-Agent header
-     * @param int $regenerateGracePeriod Seconds the old session ID remains valid after
-     *        regeneration (0 = destroy immediately, recommended for high-security apps)
+     * @param int $regenerateGracePeriod Seconds a tombstone is kept under the old session ID
+     *        after regeneration (0 = destroy immediately). The tombstone never yields
+     *        session data; requests presenting the old ID receive a fresh empty session.
      */
     public function __construct(
         private SessionStorageInterface $storage,
@@ -88,6 +90,14 @@ class SessionManager implements SessionManagerInterface
 
         // Unserialize session data
         $sessionData = $this->unserializeData($data);
+
+        // A tombstone left behind by regenerateId(): the old ID is dead and
+        // must never yield session data. Start a fresh, unauthenticated session.
+        if (isset($sessionData[self::TOMBSTONE_KEY])) {
+            $this->state = $this->createNewSession($request);
+            $this->initialized = true;
+            return $this->state;
+        }
 
         // Extract session metadata
         $createdAt = isset($sessionData['_created_at'])
@@ -194,9 +204,11 @@ class SessionManager implements SessionManagerInterface
         $this->storage->write($this->state->getId(), $serializedData, $this->absoluteTimeout);
 
         if ($this->regenerateGracePeriod > 0) {
-            // Keep old session alive for a short grace window to handle
-            // concurrent requests that may still carry the old cookie.
-            $this->storage->write($oldId, $serializedData, $this->regenerateGracePeriod);
+            // Leave only a tombstone under the old ID for the grace window.
+            // It never carries session data or authentication: a request with
+            // the old cookie gets a fresh, empty session.
+            $tombstone = $this->serializeData([self::TOMBSTONE_KEY => time()]);
+            $this->storage->write($oldId, $tombstone, $this->regenerateGracePeriod);
         } else {
             // Destroy old session immediately (recommended default).
             $this->storage->destroy($oldId);
