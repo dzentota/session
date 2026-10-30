@@ -16,6 +16,8 @@ A secure and flexible session management library for PHP applications with PSR-7
 composer require dzentota/session
 ```
 
+Requires PHP 8.3 or newer.
+
 ## Quick Start
 
 ### Basic Usage
@@ -50,7 +52,9 @@ $token = $sessionManager->generateCsrfToken();
 // Insert the token into your application forms:
 // <input type="hidden" name="csrf_token" value="<?= $token->toNative() ?>">
 
-// Verify token when processing the form
+// Verify token when processing the form. Up to 10 outstanding tokens
+// (configurable via csrfTokenPoolSize / csrfTokenTtl) are accepted, so several
+// open tabs/forms work. Use consumeCsrfToken() instead for single-use tokens.
 if ($sessionManager->isCsrfTokenValid($_POST['csrf_token'])) {
     // Continue form processing
 } else {
@@ -118,20 +122,22 @@ $storage = new CacheStorage(
 ```php
 use Dzentota\Session\Storage\DatabaseStorage;
 
-// Create the table in your database:
-// 
-// CREATE TABLE sessions (
-//     session_id VARCHAR(36) PRIMARY KEY,
-//     session_data BLOB NOT NULL,
-//     expires_at INT UNSIGNED NOT NULL,
-//     created_at INT UNSIGNED NOT NULL
-// );
-
-// Initialize PDO
+// Initialize PDO (mysql, sqlite and pgsql are supported)
 $pdo = new PDO('mysql:host=localhost;dbname=myapp', 'username', 'password');
 
 // Create storage
 $storage = new DatabaseStorage($pdo, 'sessions');
+
+// Create the table + indexes (driver-aware, idempotent). On failure it returns
+// false, logs via error_log() and exposes the exception via getLastError().
+if (!$storage->createTable()) {
+    throw $storage->getLastError();
+}
+// Or inspect/run the DDL yourself: $storage->getCreateTableStatements()
+
+// DatabaseStorage does not permanently change your PDO's error mode: it switches
+// to ERRMODE_EXCEPTION for each of its own queries and restores your setting.
+// Its read/write/destroy/gc methods throw PDOException on database errors.
 
 // Use storage with session manager
 $sessionManager = new SessionManager($storage, $cookieManager);
@@ -151,6 +157,10 @@ if ($authentication->isValid($username, $password)) {
 }
 ```
 
+After `regenerateId()` the old ID never yields session data. With
+`regenerateGracePeriod > 0` only a tombstone is kept under the old ID for that
+many seconds; a request presenting it receives a fresh, empty session.
+
 ### Session Binding to Client
 
 By default, sessions are bound to the client's IP address and User-Agent, increasing security:
@@ -167,6 +177,19 @@ $sessionManager = new SessionManager(
 ```
 
 ### Cookie Security Settings
+
+Constructor signature (positional order):
+
+```php
+public function __construct(
+    string $name = '__Host-id',
+    bool $secure = true,
+    bool $httpOnly = true,
+    string $sameSite = 'Strict',
+    string $path = '/',
+    ?int $lifetime = null
+)
+```
 
 ```php
 // Create secure cookie manager
